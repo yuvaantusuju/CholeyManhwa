@@ -1,6 +1,6 @@
-export const runtime = 'nodejs';
 import { NextResponse } from 'next/server';
 import { assertSafeRemoteUrl, fetchBinary } from '../../lib/scraper';
+export const runtime = 'edge';
 
 const headersCommon = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' };
 
