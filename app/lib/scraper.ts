@@ -1,10 +1,25 @@
-import { lookup } from 'node:dns/promises';
-import net from 'node:net';
 
 export const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
+function isIPv4(address: string): boolean {
+  const match = IPV4_RE.exec(address);
+  if (!match) return false;
+  return match.slice(1).every((part) => Number(part) >= 0 && Number(part) <= 255);
+}
+
+function isIPv6(address: string): boolean {
+  return address.includes(':') && /^[0-9a-fA-F:]+$/.test(address);
+}
+
+function isIP(address: string): 0 | 4 | 6 {
+  if (isIPv4(address)) return 4;
+  if (isIPv6(address)) return 6;
+  return 0;
+}
 function isPrivateAddress(address: string) {
-  if (net.isIPv4(address)) {
+  if (isIPv4(address)) {
     const parts = address.split('.').map(Number);
     return (
       parts[0] === 10 || parts[0] === 127 || parts[0] === 0 ||
@@ -15,7 +30,7 @@ function isPrivateAddress(address: string) {
       parts[0] >= 224
     );
   }
-  if (net.isIPv6(address)) {
+  if (isIPv6(address)) {
     const normalized = address.toLowerCase();
     return (
       normalized === '::1' || normalized === '::' || normalized.startsWith('fc') ||
@@ -25,7 +40,6 @@ function isPrivateAddress(address: string) {
   }
   return true;
 }
-
 export async function assertSafeRemoteUrl(input: string) {
   let parsed: URL;
   try {
@@ -36,9 +50,7 @@ export async function assertSafeRemoteUrl(input: string) {
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Only HTTP and HTTPS URLs are supported');
   if (parsed.username || parsed.password) throw new Error('Authenticated URLs are not supported');
   if (['localhost', 'localhost.localdomain'].includes(parsed.hostname.toLowerCase())) throw new Error('Local URLs are not supported');
-  if (net.isIP(parsed.hostname) && isPrivateAddress(parsed.hostname)) throw new Error('Private network URLs are not supported');
-  const addresses = await lookup(parsed.hostname, { all: true });
-  if (!addresses.length || addresses.some((a) => isPrivateAddress(a.address))) throw new Error('Private network URLs are not supported');
+  if (isIP(parsed.hostname) && isPrivateAddress(parsed.hostname)) throw new Error('Private network URLs are not supported');
   return parsed;
 }
 
