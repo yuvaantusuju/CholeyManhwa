@@ -3,3 +3,5 @@ compatibility_date = "2026-08-08"
 
 [assets]
 directory = ".next"
+pages_build_output_dir = ".vercel/output/static"
+
