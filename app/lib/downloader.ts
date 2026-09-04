@@ -128,75 +128,291 @@ async function createPdf(images: ImageFile[]) {
   return pdf.save({ useObjectStreams: true });
 }
 
-async function splitSpreadIfNeeded(image: ImageFile, rightToLeft: boolean): Promise<ImageFile[]> {
+type KindlePagePart = {
+  image: ImageFile;
+  sourceY: number;
+  sourceHeight: number;
+};
+
+async function splitImageForKindle(
+  image: ImageFile,
+  targetWidth: number,
+  targetHeight: number,
+): Promise<KindlePagePart[]> {
   const { width, height } = await imageDimensions(image.blob);
-  if (width <= height) return [image];
-  const bitmap = await createImageBitmap(image.blob);
-  const halfWidth = Math.round(width / 2);
-  const cropHalf = async (sourceX: number): Promise<ImageFile> => {
-    const canvas = document.createElement('canvas');
-    canvas.width = halfWidth;
-    canvas.height = height;
-    const context = canvas.getContext('2d');
-    if (!context) throw new Error('Canvas is unavailable.');
-    context.drawImage(bitmap, sourceX, 0, halfWidth, height, 0, 0, halfWidth, height);
-    const blob = await new Promise<Blob>((resolve, reject) =>
-      canvas.toBlob((value) => value ? resolve(value) : reject(new Error('Spread split failed.')), 'image/png')
+  if (!width || !height) return [];
+
+  /*
+   * IMPORTANT:
+   * Do not resize an entire long manga/manhwa page into one Kindle page.
+   *
+   * Example:
+   *   source = 1440 x 10000
+   *   Kindle  = 1236 x 1648
+   *
+   * The old code squeezed 10000px of content into 1648px.
+   * Instead, we keep the source width and divide the long image vertically
+   * into several Kindle-shaped pages.
+   */
+
+  const targetRatio = targetWidth / targetHeight;
+  const sourcePageHeight = Math.floor(width / targetRatio);
+
+  // Wide image / two-page spread:
+  // split it horizontally first so it is not squeezed into a portrait page.
+  if (width / height > 1.15) {
+    const halfWidth = Math.floor(width / 2);
+    const parts: KindlePagePart[] = [];
+
+    for (const sourceX of [0, halfWidth]) {
+      const partBlob = await cropImage(
+        image.blob,
+        sourceX,
+        0,
+        sourceX === 0 ? halfWidth : width - halfWidth,
+        height,
+      );
+
+      const part: ImageFile = {
+        blob: partBlob,
+        bytes: new Uint8Array(await partBlob.arrayBuffer()),
+        ext: "png",
+        contentType: "image/png",
+      };
+
+      const subParts = await splitImageForKindle(
+        part,
+        targetWidth,
+        targetHeight,
+      );
+
+      parts.push(...subParts);
+    }
+
+    // Manga normally reads right-to-left.
+    return parts.reverse();
+  }
+
+  // Normal portrait page that already fits reasonably well.
+  if (height <= sourcePageHeight * 1.08) {
+    return [{ image, sourceY: 0, sourceHeight: height }];
+  }
+
+  const parts: KindlePagePart[] = [];
+  let sourceY = 0;
+
+  while (sourceY < height) {
+    const remaining = height - sourceY;
+    const chunkHeight = Math.min(sourcePageHeight, remaining);
+
+    const chunkBlob = await cropImage(
+      image.blob,
+      0,
+      sourceY,
+      width,
+      chunkHeight,
     );
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    return { blob, bytes, ext: 'png', contentType: 'image/png' };
-  };
-  const leftHalf = await cropHalf(0);
-  const rightHalf = await cropHalf(halfWidth);
-  bitmap.close();
-  return rightToLeft ? [rightHalf, leftHalf] : [leftHalf, rightHalf];
+
+    const chunk: ImageFile = {
+      blob: chunkBlob,
+      bytes: new Uint8Array(await chunkBlob.arrayBuffer()),
+      ext: "png",
+      contentType: "image/png",
+    };
+
+    parts.push({
+      image: chunk,
+      sourceY: 0,
+      sourceHeight: chunkHeight,
+    });
+
+    sourceY += chunkHeight;
+  }
+
+  return parts;
 }
 
-async function fitToKindleScreen(image: ImageFile, targetWidth: number, targetHeight: number, grayscale: boolean) {
+async function cropImage(
+  blob: Blob,
+  sourceX: number,
+  sourceY: number,
+  sourceWidth: number,
+  sourceHeight: number,
+): Promise<Blob> {
+  const bitmap = await createImageBitmap(blob);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(sourceWidth));
+  canvas.height = Math.max(1, Math.round(sourceHeight));
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    bitmap.close();
+    throw new Error("Canvas is unavailable.");
+  }
+
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+
+  context.drawImage(
+    bitmap,
+    sourceX,
+    sourceY,
+    sourceWidth,
+    sourceHeight,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+
+  bitmap.close();
+
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (value) =>
+        value
+          ? resolve(value)
+          : reject(new Error("Image crop failed.")),
+      "image/png",
+    );
+  });
+}
+
+async function renderKindlePage(
+  image: ImageFile,
+  targetWidth: number,
+  targetHeight: number,
+  grayscale: boolean,
+) {
   const bitmap = await createImageBitmap(image.blob);
-  const scale = Math.min(targetWidth / bitmap.width, targetHeight / bitmap.height);
-  const drawWidth = Math.round(bitmap.width * scale);
-  const drawHeight = Math.round(bitmap.height * scale);
-  const canvas = document.createElement('canvas');
+
+  const scale = Math.min(
+    targetWidth / bitmap.width,
+    targetHeight / bitmap.height,
+  );
+
+  const drawWidth = Math.max(1, Math.round(bitmap.width * scale));
+  const drawHeight = Math.max(1, Math.round(bitmap.height * scale));
+
+  const canvas = document.createElement("canvas");
   canvas.width = targetWidth;
   canvas.height = targetHeight;
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('Canvas is unavailable.');
-  context.fillStyle = '#ffffff';
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    bitmap.close();
+    throw new Error("Canvas is unavailable.");
+  }
+
+  // White Kindle page background.
+  context.fillStyle = "#ffffff";
   context.fillRect(0, 0, targetWidth, targetHeight);
-  context.drawImage(bitmap, Math.round((targetWidth - drawWidth) / 2), Math.round((targetHeight - drawHeight) / 2), drawWidth, drawHeight);
+
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+
+  // Center without stretching.
+  context.drawImage(
+    bitmap,
+    Math.round((targetWidth - drawWidth) / 2),
+    Math.round((targetHeight - drawHeight) / 2),
+    drawWidth,
+    drawHeight,
+  );
+
   bitmap.close();
+
   if (grayscale) {
-    const imageData = context.getImageData(0, 0, targetWidth, targetHeight);
+    const imageData = context.getImageData(
+      0,
+      0,
+      targetWidth,
+      targetHeight,
+    );
+
     for (let index = 0; index < imageData.data.length; index += 4) {
-      const gray = 0.299 * imageData.data[index] + 0.587 * imageData.data[index + 1] + 0.114 * imageData.data[index + 2];
+      const gray =
+        0.299 * imageData.data[index] +
+        0.587 * imageData.data[index + 1] +
+        0.114 * imageData.data[index + 2];
+
       imageData.data[index] = gray;
       imageData.data[index + 1] = gray;
       imageData.data[index + 2] = gray;
     }
+
     context.putImageData(imageData, 0, 0);
   }
+
   const jpeg = await new Promise<Blob>((resolve, reject) =>
-    canvas.toBlob((value) => value ? resolve(value) : reject(new Error('Kindle page render failed.')), 'image/jpeg', 0.85)
+    canvas.toBlob(
+      (value) =>
+        value
+          ? resolve(value)
+          : reject(new Error("Kindle page render failed.")),
+      "image/jpeg",
+      0.90,
+    ),
   );
+
   return new Uint8Array(await jpeg.arrayBuffer());
 }
 
-async function createKindlePdf(images: ImageFile[], options: KindlePdfOptions = {}) {
-  const preset = KINDLE_PRESETS[options.preset ?? 'paperwhite-11'];
+async function createKindlePdf(
+  images: ImageFile[],
+  options: KindlePdfOptions = {},
+) {
+  const preset = KINDLE_PRESETS[options.preset ?? "paperwhite-11"];
+
+  /*
+   * These are the pixel dimensions of the Kindle display preset.
+   * The PDF page keeps exactly the same portrait aspect ratio.
+   */
   const targetWidth = options.width ?? preset.width;
   const targetHeight = options.height ?? preset.height;
+
   const pdf = await PDFDocument.create();
+
   for (const image of images) {
-    const parts = await splitSpreadIfNeeded(image, options.rightToLeft ?? true);
-    for (const part of parts) {
-      const jpegBytes = await fitToKindleScreen(part, targetWidth, targetHeight, options.grayscale ?? true);
+    if (!image?.blob) continue;
+
+    const parts = await splitImageForKindle(
+      image,
+      targetWidth,
+      targetHeight,
+    );
+
+    // If the source is RTL manga, reverse the resulting page order.
+    const orderedParts = options.rightToLeft
+      ? parts.reverse()
+      : parts;
+
+    for (const part of orderedParts) {
+      const jpegBytes = await renderKindlePage(
+        part.image,
+        targetWidth,
+        targetHeight,
+        options.grayscale ?? false,
+      );
+
       const embedded = await pdf.embedJpg(jpegBytes);
+
       const page = pdf.addPage([targetWidth, targetHeight]);
-      page.drawImage(embedded, { x: 0, y: 0, width: targetWidth, height: targetHeight });
+
+      page.drawImage(embedded, {
+        x: 0,
+        y: 0,
+        width: targetWidth,
+        height: targetHeight,
+      });
     }
   }
-  if (!pdf.getPageCount()) throw new Error('No valid panels could be added to the Kindle PDF.');
+
+  if (!pdf.getPageCount()) {
+    throw new Error("No valid panels could be added to the Kindle PDF.");
+  }
+
   return pdf.save({ useObjectStreams: true });
 }
 
