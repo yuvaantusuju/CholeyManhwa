@@ -13,9 +13,11 @@ import {
 } from "lucide-react";
 import {
   downloadArchive,
+  KINDLE_PRESETS,
   type ArchiveFormat,
   type Chapter,
   type DownloadProgress,
+  type KindlePreset,
 } from "../lib/downloader";
 import SeriesSearch, { type SearchResult } from "./SeriesSearch";
 import type { DownloadFormat as DF } from "../content/static";
@@ -42,6 +44,9 @@ export function DownloaderCard({ formats }: { formats: DF[] }) {
   const [chapterEnd, setChapterEnd] = useState(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectedFormat, setSelectedFormat] = useState<ArchiveFormat>("pdf");
+  const [kindlePreset, setKindlePreset] = useState<KindlePreset>("paperwhite-11");
+  const [kindleGrayscale, setKindleGrayscale] = useState(true);
+  const [kindleRightToLeft, setKindleRightToLeft] = useState(true);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [error, setError] = useState("");
   const [rangeApplied, setRangeApplied] = useState(false);
@@ -161,6 +166,10 @@ export function DownloaderCard({ formats }: { formats: DF[] }) {
         title: series.title,
         chapters: selectedChapters,
         format: selectedFormat,
+        kindleOptions:
+          selectedFormat === "kindle-pdf"
+            ? { preset: kindlePreset, grayscale: kindleGrayscale, rightToLeft: kindleRightToLeft }
+            : undefined,
         signal: controller.signal,
         onProgress: setProgress,
       });
@@ -439,6 +448,32 @@ export function DownloaderCard({ formats }: { formats: DF[] }) {
                     );
                   })}
                 </div>
+                {selectedFormat === "kindle-pdf" && (
+                  <div className="kindle-settings" aria-label="Kindle PDF settings">
+                    <div className="kindle-settings-heading">
+                      <strong>Kindle settings</strong>
+                      <small>Pages are fitted to your device screen.</small>
+                    </div>
+                    <label className="kindle-select-label">
+                      Device
+                      <select value={kindlePreset} onChange={(event) => setKindlePreset(event.target.value as KindlePreset)}>
+                        {Object.entries(KINDLE_PRESETS).map(([value, preset]) => (
+                          <option key={value} value={value}>{preset.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="kindle-checks">
+                      <label>
+                        <input type="checkbox" checked={kindleGrayscale} onChange={(event) => setKindleGrayscale(event.target.checked)} />
+                        <span>Grayscale for e-ink</span>
+                      </label>
+                      <label>
+                        <input type="checkbox" checked={kindleRightToLeft} onChange={(event) => setKindleRightToLeft(event.target.checked)} />
+                        <span>Right-to-left spreads</span>
+                      </label>
+                    </div>
+                  </div>
+                )}
                 <div className="export-summary">
                   <strong>Export preview</strong>
                   <p>

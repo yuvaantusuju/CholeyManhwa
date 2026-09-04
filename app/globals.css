@@ -187,6 +187,16 @@ a { color: inherit; text-decoration: none; }
 .format-option > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 8px; padding-right: 0; }
 .format-option strong { font-size: 12px; line-height: 1.2; letter-spacing: -.25px; }
 .format-option small { color: var(--muted-2); font-size: 10px; line-height: 1.5; }
+.kindle-settings { display: grid; grid-template-columns: minmax(180px, 1fr) 1.4fr; gap: 12px 18px; margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper-2); }
+.kindle-settings-heading { display: flex; flex-direction: column; gap: 4px; }
+.kindle-settings-heading strong { font-size: 10px; }
+.kindle-settings-heading small, .kindle-select-label { color: var(--muted); font-size: 8px; }
+.kindle-select-label { display: grid; gap: 5px; }
+.kindle-select-label select { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 9px; padding: 8px 9px; color: var(--ink); background: var(--cream); font-size: 9px; outline: 0; }
+.kindle-select-label select:focus { border-color: var(--blue); }
+.kindle-checks { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 12px; }
+.kindle-checks label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 8px; cursor: pointer; }
+.kindle-checks input { width: 13px; height: 13px; accent-color: var(--blue); }
 .format-tag { position: absolute; top: 18px; right: 18px; background: var(--lime); color: #101012; padding: 5px 9px; border-radius: 999px; font-size: 9px; font-weight: 900; letter-spacing: .8px; text-transform: uppercase; }
 .export-summary { margin-top: 14px; padding: 14px; border-radius: 14px; background: var(--paper-2); border: 1px solid var(--line); }
 .export-summary strong { display: block; margin-bottom: 6px; font-size: 9px; letter-spacing: .8px; text-transform: uppercase; color: var(--muted); }
@@ -338,6 +348,8 @@ footer { background: #101012; color: white; padding: 70px 0 20px; }
   .chapter-count { grid-column: 1 / -1; justify-self: start; }
   .format-grid { grid-template-columns: 1fr; }
   .format-option small { font-size: 7.5px; }
+  .kindle-settings { grid-template-columns: 1fr; }
+  .kindle-checks { grid-column: auto; flex-direction: column; gap: 8px; }
   .section-intro { grid-template-columns: 1fr; }
   .section-intro .eyebrow { grid-column: auto; }
   .section-intro h2 { font-size: 42px; }

@@ -31,6 +31,13 @@ export const downloadFormats: DownloadFormat[] = [
     description: "Raw panel images bundled in a numbered zip archive.",
     recommended: false,
   },
+  {
+    id: 4,
+    name: "KINDLE-PDF",
+    extension: "pdf",
+    description: "Device-sized PDF with spread splitting and optional grayscale for e-ink screens.",
+    recommended: false,
+  },
 ];
 
 export type ContentItem = {
@@ -59,9 +66,9 @@ export const pageContent: ContentItem[] = [
     id: 2,
     section: "feature",
     slug: "three-formats",
-    eyebrow: "THREE FORMATS",
-    title: "PDF, CBZ, or ZIP",
-    description: "Choose a single multi-page PDF, a reader-friendly CBZ, or a raw numbered zip — whatever your reader prefers.",
+    eyebrow: "FOUR FORMATS",
+    title: "PDF, CBZ, ZIP, or Kindle PDF",
+    description: "Choose a single multi-page PDF, a reader-friendly CBZ, raw numbered images, or a screen-fitted Kindle PDF.",
     icon: "format",
     sort_order: 2,
   },

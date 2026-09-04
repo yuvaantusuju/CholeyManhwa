@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
 import { PDFDocument } from 'pdf-lib';
 
-export type ArchiveFormat = 'pdf' | 'cbz' | 'zip';
+export type ArchiveFormat = 'pdf' | 'cbz' | 'zip' | 'kindle-pdf';
 export type Chapter = { name: string; url: string };
 export type DownloadProgress = {
   phase: string;
@@ -18,6 +18,22 @@ export type DownloadProgress = {
 
 type ImageFile = { blob: Blob; bytes: Uint8Array<ArrayBuffer>; ext: string; contentType: string };
 type ChapterResult = { chapter: Chapter; success: boolean; images: ImageFile[]; error?: string };
+
+export const KINDLE_PRESETS = {
+  'paperwhite-11': { width: 1236, height: 1648, label: 'Kindle Paperwhite (11th gen)' },
+  oasis: { width: 1264, height: 1680, label: 'Kindle Oasis' },
+  scribe: { width: 1860, height: 2480, label: 'Kindle Scribe' },
+  basic: { width: 1072, height: 1448, label: 'Kindle Basic / Kids' },
+} as const;
+export type KindlePreset = keyof typeof KINDLE_PRESETS;
+
+export type KindlePdfOptions = {
+  preset?: KindlePreset;
+  width?: number;
+  height?: number;
+  grayscale?: boolean;
+  rightToLeft?: boolean;
+};
 
 const sanitize = (name: string) => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120) || 'chapter';
 const pad = (value: number, total: number) => String(value).padStart(Math.max(3, String(total).length), '0');
@@ -112,6 +128,78 @@ async function createPdf(images: ImageFile[]) {
   return pdf.save({ useObjectStreams: true });
 }
 
+async function splitSpreadIfNeeded(image: ImageFile, rightToLeft: boolean): Promise<ImageFile[]> {
+  const { width, height } = await imageDimensions(image.blob);
+  if (width <= height) return [image];
+  const bitmap = await createImageBitmap(image.blob);
+  const halfWidth = Math.round(width / 2);
+  const cropHalf = async (sourceX: number): Promise<ImageFile> => {
+    const canvas = document.createElement('canvas');
+    canvas.width = halfWidth;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Canvas is unavailable.');
+    context.drawImage(bitmap, sourceX, 0, halfWidth, height, 0, 0, halfWidth, height);
+    const blob = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob((value) => value ? resolve(value) : reject(new Error('Spread split failed.')), 'image/png')
+    );
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    return { blob, bytes, ext: 'png', contentType: 'image/png' };
+  };
+  const leftHalf = await cropHalf(0);
+  const rightHalf = await cropHalf(halfWidth);
+  bitmap.close();
+  return rightToLeft ? [rightHalf, leftHalf] : [leftHalf, rightHalf];
+}
+
+async function fitToKindleScreen(image: ImageFile, targetWidth: number, targetHeight: number, grayscale: boolean) {
+  const bitmap = await createImageBitmap(image.blob);
+  const scale = Math.min(targetWidth / bitmap.width, targetHeight / bitmap.height);
+  const drawWidth = Math.round(bitmap.width * scale);
+  const drawHeight = Math.round(bitmap.height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Canvas is unavailable.');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, targetWidth, targetHeight);
+  context.drawImage(bitmap, Math.round((targetWidth - drawWidth) / 2), Math.round((targetHeight - drawHeight) / 2), drawWidth, drawHeight);
+  bitmap.close();
+  if (grayscale) {
+    const imageData = context.getImageData(0, 0, targetWidth, targetHeight);
+    for (let index = 0; index < imageData.data.length; index += 4) {
+      const gray = 0.299 * imageData.data[index] + 0.587 * imageData.data[index + 1] + 0.114 * imageData.data[index + 2];
+      imageData.data[index] = gray;
+      imageData.data[index + 1] = gray;
+      imageData.data[index + 2] = gray;
+    }
+    context.putImageData(imageData, 0, 0);
+  }
+  const jpeg = await new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob((value) => value ? resolve(value) : reject(new Error('Kindle page render failed.')), 'image/jpeg', 0.85)
+  );
+  return new Uint8Array(await jpeg.arrayBuffer());
+}
+
+async function createKindlePdf(images: ImageFile[], options: KindlePdfOptions = {}) {
+  const preset = KINDLE_PRESETS[options.preset ?? 'paperwhite-11'];
+  const targetWidth = options.width ?? preset.width;
+  const targetHeight = options.height ?? preset.height;
+  const pdf = await PDFDocument.create();
+  for (const image of images) {
+    const parts = await splitSpreadIfNeeded(image, options.rightToLeft ?? true);
+    for (const part of parts) {
+      const jpegBytes = await fitToKindleScreen(part, targetWidth, targetHeight, options.grayscale ?? true);
+      const embedded = await pdf.embedJpg(jpegBytes);
+      const page = pdf.addPage([targetWidth, targetHeight]);
+      page.drawImage(embedded, { x: 0, y: 0, width: targetWidth, height: targetHeight });
+    }
+  }
+  if (!pdf.getPageCount()) throw new Error('No valid panels could be added to the Kindle PDF.');
+  return pdf.save({ useObjectStreams: true });
+}
+
 function saveBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -129,10 +217,11 @@ const formatBytes = (bytes: number) => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-export async function downloadArchive({ title, chapters, format, onProgress, signal }: {
+export async function downloadArchive({ title, chapters, format, kindleOptions, onProgress, signal }: {
   title: string;
   chapters: Chapter[];
   format: ArchiveFormat;
+  kindleOptions?: KindlePdfOptions;
   onProgress: (progress: DownloadProgress) => void;
   signal?: AbortSignal;
 }) {
@@ -225,6 +314,10 @@ export async function downloadArchive({ title, chapters, format, onProgress, sig
         sendProgress({ phase: 'Building PDF…', currentChapter: chapterIndex + 1, totalChapters, currentImage: allImages.length, totalImages: allImages.length, chapterName: result.chapter.name, percent: 92 + Math.round((chapterIndex + 1) / totalChapters * 6) });
         const pdfBytes = await createPdf(allImages);
         archive.file(`${seriesName} - ${folderName}.pdf`, pdfBytes, { compression: 'STORE' });
+      } else if (format === 'kindle-pdf') {
+        sendProgress({ phase: 'Building Kindle PDF…', currentChapter: chapterIndex + 1, totalChapters, currentImage: allImages.length, totalImages: allImages.length, chapterName: result.chapter.name, percent: 92 + Math.round((chapterIndex + 1) / totalChapters * 6) });
+        const pdfBytes = await createKindlePdf(allImages, kindleOptions);
+        archive.file(`${seriesName} - ${folderName} (Kindle).pdf`, pdfBytes, { compression: 'STORE' });
       } else {
         const folder = totalChapters > 1 || format === 'zip' ? archive.folder(folderName) : archive;
         for (let imageIndex = 0; imageIndex < allImages.length; imageIndex += 1) {
@@ -241,14 +334,15 @@ export async function downloadArchive({ title, chapters, format, onProgress, sig
 
     let output: Blob;
     let filename: string;
-    if (format === 'pdf' && totalChapters === 1) {
+    if ((format === 'pdf' || format === 'kindle-pdf') && totalChapters === 1) {
       const onlyFile = Object.values(archive.files).find((file) => !file.dir);
       if (!onlyFile) throw new Error('PDF file was not created.');
       output = await onlyFile.async('blob');
       filename = onlyFile.name;
     } else {
       output = await archive.generateAsync({ type: 'blob', compression: 'STORE', streamFiles: true });
-      filename = format === 'pdf' ? `${seriesName}-pdfs.zip` : `${seriesName}.${format}`;
+      const suffix = format === 'pdf' ? 'pdfs' : format === 'kindle-pdf' ? 'kindle-pdfs' : format;
+      filename = format === 'pdf' || format === 'kindle-pdf' ? `${seriesName}-${suffix}.zip` : `${seriesName}.${format}`;
     }
 
     saveBlob(output, filename);
