@@ -87,9 +87,14 @@ async function fetchImage(url: string, referer: string, signal?: AbortSignal): P
     throw new Error(data.error || `Panel request failed (${response.status}).`);
   }
   const contentType = response.headers.get('content-type') || 'image/jpeg';
-  const raw = new Uint8Array(await response.arrayBuffer());
-  const bytes = new Uint8Array(new ArrayBuffer(raw.byteLength));
-  bytes.set(raw);
+  const rawBuffer = await response.arrayBuffer();
+  
+  // Validate that response isn't an HTML error page or empty
+  if (rawBuffer.byteLength < 100) {
+    throw new Error(`Corrupted or empty image download (${rawBuffer.byteLength} bytes).`);
+  }
+
+  const bytes = new Uint8Array(rawBuffer.slice(0));
   return { blob: new Blob([bytes], { type: contentType }), bytes, ext: extension(contentType, url), contentType };
 }
 
@@ -97,14 +102,61 @@ function imageDimensions(blob: Blob): Promise<{ width: number; height: number }>
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob);
     const image = new Image();
-    image.onload = () => { resolve({ width: image.naturalWidth, height: image.naturalHeight }); URL.revokeObjectURL(url); };
-    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not decode panel.')); };
+    image.crossOrigin = 'anonymous';
+    
+    image.onload = () => {
+      const dim = { width: image.naturalWidth, height: image.naturalHeight };
+      URL.revokeObjectURL(url);
+      if (!dim.width || !dim.height) {
+        reject(new Error('Image loaded with 0x0 dimensions.'));
+      } else {
+        resolve(dim);
+      }
+    };
+    image.onerror = () => { 
+      URL.revokeObjectURL(url); 
+      reject(new Error('Failed to decode image dimensions from Blob.')); 
+    };
     image.src = url;
   });
 }
 
+/**
+ * Robust image loader using standard Image element fallback 
+ * to handle WebP/AVIF or non-decodable blobs safely.
+ */
+async function loadHtmlImage(blob: Blob): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('The source image could not be decoded.'));
+    };
+    img.src = url;
+  });
+}
+
+/**
+ * Creates ImageBitmap cleanly with standard HTMLImage element fallback
+ */
+async function safeCreateBitmap(blob: Blob): Promise<ImageBitmap> {
+  try {
+    return await createImageBitmap(blob);
+  } catch {
+    // Fallback if createImageBitmap fails on webp/avif blobs
+    const img = await loadHtmlImage(blob);
+    return await createImageBitmap(img);
+  }
+}
+
 async function convertToJpeg(blob: Blob, width: number, height: number): Promise<Uint8Array> {
-  const bitmap = await createImageBitmap(blob);
+  const bitmap = await safeCreateBitmap(blob);
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -135,72 +187,51 @@ async function createPdf(images: ImageFile[]) {
 }
 
 // ---------------------------------------------------------------------------
-// Kindle-optimized PDF generation & Image Normalization
+// Kindle-optimized PDF generation
 // ---------------------------------------------------------------------------
 
 /**
- * Normalizes image formats like WebP or AVIF into standard browser-supported 2D Canvas PNG blobs
- * to prevent createImageBitmap decoding errors during slicing and resizing.
+ * Ensures image is decodable by normalizing WebP/AVIF images to standard PNG canvas blobs
  */
 async function ensureDecodableImage(image: ImageFile): Promise<ImageFile> {
   if (image.contentType.includes('jpeg') || image.contentType.includes('jpg') || image.contentType.includes('png')) {
     return image;
   }
 
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(image.blob);
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
+  try {
+    const img = await loadHtmlImage(image.blob);
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
 
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas context unavailable.');
 
-      if (!ctx) {
-        URL.revokeObjectURL(url);
-        return reject(new Error('Canvas context unavailable for image normalization.'));
-      }
+    ctx.drawImage(img, 0, 0);
 
-      ctx.drawImage(img, 0, 0);
-      URL.revokeObjectURL(url);
+    const blob = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob((val) => (val ? resolve(val) : reject(new Error('Normalization failed'))), 'image/png')
+    );
+    const bytes = new Uint8Array(await blob.arrayBuffer());
 
-      canvas.toBlob(async (blob) => {
-        if (!blob) return reject(new Error('Failed to normalize image format.'));
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        resolve({
-          blob,
-          bytes,
-          ext: 'png',
-          contentType: 'image/png',
-        });
-      }, 'image/png');
-    };
-
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('The source image could not be decoded.'));
-    };
-
-    img.src = url;
-  });
+    return { blob, bytes, ext: 'png', contentType: 'image/png' };
+  } catch {
+    throw new Error('The source image could not be decoded.');
+  }
 }
 
 /**
- * Handles Webtoon / Manhwa long vertical strips by slicing them 
- * vertically according to the target screen aspect ratio.
+ * Slices long manhwa/webtoon images vertically
  */
 async function splitVerticalStripIfNeeded(image: ImageFile, targetWidth: number, targetHeight: number): Promise<ImageFile[]> {
   const { width, height } = await imageDimensions(image.blob);
   const targetRatio = targetHeight / targetWidth;
   
-  // If height isn't significantly longer than standard aspect ratio, return as is
   if (height <= width * targetRatio * 1.2) {
     return [image];
   }
 
-  const bitmap = await createImageBitmap(image.blob);
+  const bitmap = await safeCreateBitmap(image.blob);
   const sliceHeight = Math.round(width * targetRatio);
   const totalSlices = Math.ceil(height / sliceHeight);
   const slices: ImageFile[] = [];
@@ -229,15 +260,13 @@ async function splitVerticalStripIfNeeded(image: ImageFile, targetWidth: number,
 }
 
 /**
- * Splits a wide "double-page spread" image into two separate images
- * (right half, then left half, for manga reading order — or left-then-right
- * if rightToLeft is false).
+ * Splits horizontal double spreads
  */
 async function splitSpreadIfNeeded(image: ImageFile, rightToLeft: boolean): Promise<ImageFile[]> {
   const { width, height } = await imageDimensions(image.blob);
   if (width <= height) return [image];
 
-  const bitmap = await createImageBitmap(image.blob);
+  const bitmap = await safeCreateBitmap(image.blob);
   const halfWidth = Math.round(width / 2);
 
   const cropHalf = async (sx: number): Promise<ImageFile> => {
@@ -262,12 +291,10 @@ async function splitSpreadIfNeeded(image: ImageFile, rightToLeft: boolean): Prom
 }
 
 /**
- * Fits an image into the target Kindle screen size (contain-fit, centered,
- * white background so nothing gets stretched or squished), with optional
- * grayscale conversion for smaller files on e-ink displays.
+ * Fits image into target Kindle screen dimensions
  */
 async function fitToKindleScreen(image: ImageFile, targetWidth: number, targetHeight: number, grayscale: boolean): Promise<Uint8Array> {
-  const bitmap = await createImageBitmap(image.blob);
+  const bitmap = await safeCreateBitmap(image.blob);
   const scale = Math.min(targetWidth / bitmap.width, targetHeight / bitmap.height);
   const drawWidth = Math.round(bitmap.width * scale);
   const drawHeight = Math.round(bitmap.height * scale);
@@ -311,14 +338,14 @@ async function createKindlePdf(images: ImageFile[], options: KindlePdfOptions = 
   const pdf = await PDFDocument.create();
 
   for (const rawImage of images) {
-    // 1. Convert non-standard images (WebP/AVIF) to decodable PNG blobs
+    // Normalize format
     const image = await ensureDecodableImage(rawImage);
 
-    // 2. Slice long manhwa/webtoon images vertically
+    // Slice long manhwa strips
     const verticalSlices = await splitVerticalStripIfNeeded(image, targetWidth, targetHeight);
 
     for (const slice of verticalSlices) {
-      // 3. Split horizontal double spreads
+      // Split double spreads
       const parts = await splitSpreadIfNeeded(slice, rightToLeft);
 
       for (const part of parts) {
