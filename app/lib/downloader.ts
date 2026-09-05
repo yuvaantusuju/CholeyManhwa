@@ -41,7 +41,12 @@ const pad = (value: number, total: number) => String(value).padStart(Math.max(3,
 
 const CONCURRENCY = { IMAGE: 16, CHAPTER: 3 };
 
-async function mapPool<T, R>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<R>, onDone?: (done: number, total: number) => void): Promise<(R | null)[]> {
+async function mapPool<T, R>(
+  items: T[], 
+  concurrency: number, 
+  worker: (item: T, index: number) => Promise<R>, 
+  onDone?: (done: number, total: number) => void
+): Promise<(R | null)[]> {
   const results: (R | null)[] = new Array(items.length).fill(null);
   let next = 0;
   let done = 0;
@@ -130,8 +135,57 @@ async function createPdf(images: ImageFile[]) {
 }
 
 // ---------------------------------------------------------------------------
-// Kindle-optimized PDF generation
+// Kindle-optimized PDF generation & Image Normalization
 // ---------------------------------------------------------------------------
+
+/**
+ * Normalizes image formats like WebP or AVIF into standard browser-supported 2D Canvas PNG blobs
+ * to prevent createImageBitmap decoding errors during slicing and resizing.
+ */
+async function ensureDecodableImage(image: ImageFile): Promise<ImageFile> {
+  if (image.contentType.includes('jpeg') || image.contentType.includes('jpg') || image.contentType.includes('png')) {
+    return image;
+  }
+
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(image.blob);
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext('2d');
+
+      if (!ctx) {
+        URL.revokeObjectURL(url);
+        return reject(new Error('Canvas context unavailable for image normalization.'));
+      }
+
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+
+      canvas.toBlob(async (blob) => {
+        if (!blob) return reject(new Error('Failed to normalize image format.'));
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        resolve({
+          blob,
+          bytes,
+          ext: 'png',
+          contentType: 'image/png',
+        });
+      }, 'image/png');
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('The source image could not be decoded.'));
+    };
+
+    img.src = url;
+  });
+}
 
 /**
  * Handles Webtoon / Manhwa long vertical strips by slicing them 
@@ -256,12 +310,15 @@ async function createKindlePdf(images: ImageFile[], options: KindlePdfOptions = 
 
   const pdf = await PDFDocument.create();
 
-  for (const image of images) {
-    // Slices long manhwa/webtoon images vertically
+  for (const rawImage of images) {
+    // 1. Convert non-standard images (WebP/AVIF) to decodable PNG blobs
+    const image = await ensureDecodableImage(rawImage);
+
+    // 2. Slice long manhwa/webtoon images vertically
     const verticalSlices = await splitVerticalStripIfNeeded(image, targetWidth, targetHeight);
 
     for (const slice of verticalSlices) {
-      // Splits horizontal double spreads
+      // 3. Split horizontal double spreads
       const parts = await splitSpreadIfNeeded(slice, rightToLeft);
 
       for (const part of parts) {
@@ -360,7 +417,6 @@ export async function downloadArchive({ title, chapters, format, kindleOptions, 
       const chapterNumber = index + 1;
       onProgress({ phase: 'Scanning panels…', currentChapter: chapterNumber, totalChapters, currentImage: 0, totalImages: 0, chapterName: chapter.name, percent: Math.round((chapterNumber / totalChapters) * 10) });
       const imageUrls = await fetchChapterImages(chapter.url, signal);
-      const chapterStartBytes = totalBytes;
       const images = await mapPool(imageUrls, CONCURRENCY.IMAGE, (imageUrl) => fetchImage(imageUrl, chapter.url, signal), (done, total) => {
         const chapterPercent = Math.round((chapterNumber - 1 + done / Math.max(1, total)) / totalChapters * 90);
         onProgress({ phase: 'Downloading panels…', currentChapter: chapterNumber, totalChapters, currentImage: done, totalImages: total, chapterName: chapter.name, percent: chapterPercent });
